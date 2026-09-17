@@ -1,15 +1,28 @@
 from flask import Flask, request, render_template, flash, redirect, url_for, send_from_directory
 import os
+import secrets
+from datetime import datetime
 from werkzeug.utils import secure_filename
+from PIL import Image, UnidentifiedImageError
 from ml_model import load_or_train_model, predict_mangrove, predict_combined
 from binary_detector import load_binary_model
 
 ALLOWED_EXTENSIONS = ['png', 'jpg', 'jpeg']
+MAX_RECENT_UPLOADS = 6
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
-app.secret_key = 'mangrove-detection-secret-key-change-in-production'
+
+# Secret key: read from environment in production; fall back to a random
+# per-process key locally so nothing hardcoded ever ships in source control.
+# Note: a random fallback means sessions/flashes won't survive a restart -
+# set FLASK_SECRET_KEY explicitly for any real deployment.
+app.secret_key = os.environ.get('FLASK_SECRET_KEY') or secrets.token_hex(32)
+if not os.environ.get('FLASK_SECRET_KEY'):
+    print("Warning: FLASK_SECRET_KEY not set - using a random key for this process only.")
+
+DEBUG_MODE = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -17,6 +30,42 @@ model = None
 mangrove_type = None
 gpu = None
 binary_model = None
+
+# In-memory history of recent uploads for display on the upload page.
+# Not persisted across restarts - fine for local/demo use, but this would
+# need a real store (DB, or even a JSON file) to survive a server restart
+# or run across multiple worker processes in production.
+recent_uploads = []
+
+
+def record_upload(filename, result, error):
+    """Add an entry to the recent-uploads list (most recent first)."""
+    if error:
+        summary = 'Analysis error'
+        status = 'error'
+    elif not result:
+        summary = 'No result'
+        status = 'error'
+    elif result.get('multi_class'):
+        mc = result['multi_class']
+        summary = f"{mc['predicted_class']} ({mc['confidence'] * 100:.0f}%)"
+        status = 'ok'
+    elif 'predicted_class' in result:
+        # Fallback single-model path (predict_mangrove) returns the
+        # classification dict directly rather than nested under multi_class.
+        summary = f"{result['predicted_class']} ({result['confidence'] * 100:.0f}%)"
+        status = 'ok'
+    else:
+        summary = 'No mangrove detected'
+        status = 'none'
+
+    recent_uploads.insert(0, {
+        'filename': filename,
+        'summary': summary,
+        'status': status,
+        'timestamp': datetime.now().strftime('%d %b, %H:%M'),
+    })
+    del recent_uploads[MAX_RECENT_UPLOADS:]
 
 
 def initialize_models():
@@ -46,12 +95,24 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+def is_valid_image(filepath):
+    """Verify the uploaded file is actually a readable image, not just a
+    file with an image-like extension. Catches renamed/corrupt uploads
+    before they reach the ML pipeline."""
+    try:
+        with Image.open(filepath) as img:
+            img.verify()
+        return True
+    except (UnidentifiedImageError, OSError):
+        return False
+
+
 # Prevent double initialization in Flask reloader
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not DEBUG_MODE:
     initialize_models()
 
 
-@app.route('/', methods=['GET', 'POST'])
+@app.route('/upload', methods=['GET', 'POST'])
 def upload():
     if request.method == 'POST':
         if 'orthomosaic' not in request.files:
@@ -69,13 +130,23 @@ def upload():
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
 
+            if not is_valid_image(filepath):
+                os.remove(filepath)
+                flash('That file is not a valid image (extension did not match content).')
+                return redirect(request.url)
+
             flash(f'File uploaded successfully: {filename}')
             return redirect(url_for('analyze', name=filename))
         else:
             flash('Invalid file type. Allowed: PNG, JPG, JPEG')
             return redirect(request.url)
 
-    return render_template('home.html')
+    return render_template('home.html', recent_uploads=recent_uploads)
+
+
+@app.route('/')
+def about():
+    return render_template('about.html')
 
 
 @app.route('/files/<name>')
@@ -114,6 +185,8 @@ def analyze(name):
 
     image_url = url_for('serve_file', name=name)
 
+    record_upload(name, analysis_result, error_message)
+
     return render_template(
         'analysis_results.html',
         image_url=image_url,
@@ -137,4 +210,6 @@ def base():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Debug mode (and its interactive debugger) must stay off outside local
+    # development - set FLASK_DEBUG=true in your local .env to enable it.
+    app.run(debug=DEBUG_MODE)
