@@ -1,7 +1,6 @@
 # any image files
 *.jpg
 *.jpeg
-*.png
 *.tif
 *.tiff
 
@@ -14,3 +13,8 @@
 
 # cache files
 */__pycache__/*
+
+# local environment variables (database credentials)
+.env
+.secrets/
+.venv/

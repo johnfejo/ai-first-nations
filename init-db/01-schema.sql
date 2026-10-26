@@ -1,0 +1,241 @@
+-- AIFN Mangrove Survey Platform — PostgreSQL Schema
+
+-- ---------------------------------------------------------------------
+-- SITE
+-- ---------------------------------------------------------------------
+CREATE SEQUENCE site_code_seq START WITH 1;
+
+CREATE TABLE site (
+    site_id       SERIAL PRIMARY KEY,
+    site_code     VARCHAR(50) NOT NULL UNIQUE DEFAULT (
+    'SITE-' || LPAD(nextval('site_code_seq')::text, 6, '0')),
+    
+    site_name     VARCHAR(255) NOT NULL,
+    latitude      NUMERIC(9,6),
+    longitude     NUMERIC(9,6),
+    region        VARCHAR(255),
+    state         VARCHAR(100),
+    country       VARCHAR(100),
+    description   TEXT,
+    created_at    TIMESTAMP NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------
+-- SURVEY
+-- ---------------------------------------------------------------------
+CREATE TABLE survey (
+    survey_id     SERIAL PRIMARY KEY,
+    survey_code   VARCHAR(50) NOT NULL UNIQUE,
+    site_id       INTEGER NOT NULL REFERENCES site(site_id),
+    survey_name   VARCHAR(255),
+    survey_date   DATE NOT NULL,
+    survey_type   VARCHAR(100),
+    notes         TEXT,
+    created_at    TIMESTAMP NOT NULL DEFAULT now(),
+    status        VARCHAR(50) NOT NULL DEFAULT 'pending'
+);
+
+-- ---------------------------------------------------------------------
+-- SURVEY_FILE
+-- Mission-level supporting files such as MRK, NAV, OBS and RTK.
+-- Files remain in external storage; PostgreSQL stores their references.
+-- ---------------------------------------------------------------------
+CREATE TABLE survey_file (
+    survey_file_id       SERIAL PRIMARY KEY,
+    survey_id            INTEGER NOT NULL REFERENCES survey(survey_id),
+
+    file_type            VARCHAR(10) NOT NULL,
+    filename             VARCHAR(255) NOT NULL,
+    file_size_bytes      BIGINT,
+    format_version       VARCHAR(50),
+    -- SHA-256 fingerprint used to verify file integrity and detect duplicates
+    checksum_sha256      VARCHAR(64), 
+
+    storage_provider     VARCHAR(50) NOT NULL,
+    storage_container_id VARCHAR(255),
+    storage_item_id      VARCHAR(500),
+    storage_url          TEXT NOT NULL,
+
+    uploaded_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT survey_file_type_check CHECK (
+        file_type IN ('MRK', 'NAV', 'OBS', 'RTK')
+    ),
+
+    CONSTRAINT survey_file_type_unique UNIQUE (
+        survey_id,
+        file_type
+    ),
+
+    CONSTRAINT survey_file_storage_unique UNIQUE (
+        storage_provider,
+        storage_container_id,
+        storage_item_id
+    )
+);
+
+-- ---------------------------------------------------------------------
+-- IMAGE  (belongs to a Survey)
+-- ---------------------------------------------------------------------
+CREATE TABLE image (
+    image_id             SERIAL PRIMARY KEY,
+    survey_id            INTEGER NOT NULL REFERENCES survey(survey_id),
+    filename             VARCHAR(255) NOT NULL,
+    file_type            VARCHAR(50),
+    file_size_bytes      BIGINT,
+
+    storage_provider       VARCHAR(50) NOT NULL,
+    storage_container_id   VARCHAR(255),
+    storage_item_id        VARCHAR(500),
+    storage_url            TEXT NOT NULL,
+
+    width                  INTEGER,
+    height                 INTEGER,
+    band_count             INTEGER,
+    band_configuration     VARCHAR(100),
+    capture_sequence       INTEGER,
+    capture_date           TIMESTAMPTZ,
+
+    latitude               NUMERIC(12,9),
+    longitude              NUMERIC(12,9),
+    absolute_altitude      NUMERIC(10,3),
+    relative_altitude      NUMERIC(10,3),
+
+    positioning_status     VARCHAR(20),
+    rtk_std_latitude       NUMERIC(10,6),
+    rtk_std_longitude      NUMERIC(10,6),
+    rtk_std_height         NUMERIC(10,6),
+
+    camera_model           VARCHAR(100),
+    source_metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    uploaded_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    CONSTRAINT image_capture_sequence_unique UNIQUE (
+        survey_id,
+        capture_sequence
+    ),
+
+    CONSTRAINT image_storage_unique UNIQUE (
+        storage_provider,
+        storage_container_id,
+        storage_item_id
+    )
+);
+
+-- ---------------------------------------------------------------------
+-- MODEL  (registered ML model / version)
+-- ---------------------------------------------------------------------
+CREATE TABLE model (
+    model_id       SERIAL PRIMARY KEY,
+    model_name     VARCHAR(255) NOT NULL,
+    model_version  VARCHAR(50) NOT NULL,
+    model_type     VARCHAR(100),
+    task           VARCHAR(100),
+    model_path     VARCHAR(500),
+    description    TEXT,
+    created_at     TIMESTAMP NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------
+-- SPECIES  (reference table for class labels — currently colour
+-- morphotype: orange/red/yellow, not taxonomic species)
+-- ---------------------------------------------------------------------
+CREATE TABLE species (
+    species_id       SERIAL PRIMARY KEY,
+    common_name      VARCHAR(255) NOT NULL,
+    scientific_name  VARCHAR(255),
+    description      TEXT
+);
+
+-- ---------------------------------------------------------------------
+-- ANALYSIS_RESULT  (one model run against one image)
+-- ---------------------------------------------------------------------
+CREATE TABLE analysis_result (
+    analysis_id           SERIAL PRIMARY KEY,
+    image_id               INTEGER NOT NULL REFERENCES image(image_id),
+    model_id                INTEGER NOT NULL REFERENCES model(model_id),
+    predicted_species_id    INTEGER REFERENCES species(species_id),
+    analysis_type           VARCHAR(50) NOT NULL, 
+    predicted_class         VARCHAR(100),
+    confidence               NUMERIC(5,4) CHECK (confidence BETWEEN 0 AND 1),
+    status                   VARCHAR(50) NOT NULL DEFAULT 'pending',
+    processed_at             TIMESTAMP,
+    error_message            TEXT,
+
+    CONSTRAINT analysis_result_type_check CHECK (
+        analysis_type IN (
+            'binary_detection',
+            'species_classification'
+        )
+    )
+);
+
+-- ---------------------------------------------------------------------
+-- CLASS_PROBABILITY  (full probability breakdown per analysis run)
+-- ---------------------------------------------------------------------
+CREATE TABLE class_probability (
+    probability_id   SERIAL PRIMARY KEY,
+    analysis_id       INTEGER NOT NULL REFERENCES analysis_result(analysis_id),
+    species_id         INTEGER REFERENCES species(species_id),
+    class_label        VARCHAR(100) NOT NULL,
+    probability         NUMERIC(5,4) NOT NULL CHECK (probability BETWEEN 0 AND 1),
+    created_at          TIMESTAMP NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------
+-- TILE_COMPOSITION  (per-tile labels for one image: how many 512px tiles
+-- were Non-Mangrove / orange / red / yellow; attached to the image's
+-- species_classification analysis)
+-- ---------------------------------------------------------------------
+CREATE TABLE tile_composition (
+    tile_composition_id  SERIAL PRIMARY KEY,
+    analysis_id           INTEGER NOT NULL REFERENCES analysis_result(analysis_id) ON DELETE CASCADE,
+    class_label           VARCHAR(100) NOT NULL,
+    tile_count            INTEGER NOT NULL CHECK (tile_count >= 0),
+
+    CONSTRAINT tile_composition_unique UNIQUE (
+        analysis_id,
+        class_label
+    )
+);
+
+-- ---------------------------------------------------------------------
+-- REPORT  (per-survey downloadable export)
+-- ---------------------------------------------------------------------
+CREATE TABLE report (
+    report_id       SERIAL PRIMARY KEY,
+    survey_id        INTEGER NOT NULL REFERENCES survey(survey_id),
+    report_title          VARCHAR(255),
+    report_type           VARCHAR(100),
+
+    filename              VARCHAR(255) NOT NULL,
+    file_size_bytes       BIGINT,
+    -- SHA-256 fingerprint used to verify file integrity
+    checksum_sha256       VARCHAR(64),
+
+    storage_provider      VARCHAR(50) NOT NULL,
+    storage_container_id  VARCHAR(255) NOT NULL,
+    storage_item_id       VARCHAR(500) NOT NULL,
+    storage_url           TEXT,
+
+    generated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    generated_by          VARCHAR(255),
+    summary_notes         TEXT,
+
+    CONSTRAINT report_storage_unique UNIQUE (
+        storage_provider,
+        storage_container_id,
+        storage_item_id
+    )
+);
+
+-- ---------------------------------------------------------------------
+-- Helpful indexes for common lookups
+-- ---------------------------------------------------------------------
+CREATE INDEX idx_survey_site_id ON survey(site_id);
+CREATE INDEX idx_survey_file_survey_id ON survey_file(survey_id);
+CREATE INDEX idx_image_survey_id ON image(survey_id);
+CREATE INDEX idx_analysis_image_id ON analysis_result(image_id);
+CREATE INDEX idx_class_probability_analysis_id ON class_probability(analysis_id);
+CREATE INDEX idx_report_survey_id ON report(survey_id);

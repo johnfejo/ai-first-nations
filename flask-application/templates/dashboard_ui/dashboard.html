@@ -1,0 +1,127 @@
+{% extends "dashboard_ui/base.html" %}
+{% block title %}Dashboard · AI First Nations{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+{% block page_subtitle %}Overview of sites, surveys and recent analysis.{% endblock %}
+{% block body %}
+{% set MONTHS = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'] %}
+{% set class_total = summary.species_counts.values() | sum %}
+
+<section class="dash-welcome">
+    <img src="{{ url_for('static', filename='dashboard/images/wominjeka-banner.webp') }}"
+         alt="Mangrove canopy photographed from above by drone" width="1400" height="428">
+    <div class="dash-welcome-veil"></div>
+    <div class="dash-welcome-text">
+        <p class="dash-greet">Womin djeka</p>
+        <p class="dash-gloss">AI First Nations · Mangrove Monitoring</p>
+        <p class="dash-ack">Drone survey imagery, analysed for canopy coverage and composition across every site.</p>
+    </div>
+</section>
+
+<div class="page-actions">
+    <div>
+        <h2>Mangrove Survey Dashboard</h2>
+        <p>Monitor mangrove sites and track survey results over time.</p>
+    </div>
+    <a class="btn primary" href="{{ url_for('survey_step_1') }}">Create Survey</a>
+</div>
+
+
+<div class="dash-kpis">
+    <div class="dash-kpi">
+        <span class="dash-kpi-key">Sites</span>
+        <strong class="dash-kpi-num">{{ summary.total_sites }}</strong>
+        <span class="dash-kpi-sub">monitoring locations</span>
+        <span class="dash-kpi-tick" style="background: #0a6a83;"></span>
+    </div>
+    <div class="dash-kpi">
+        <span class="dash-kpi-key">Surveys</span>
+        <strong class="dash-kpi-num">{{ summary.total_surveys }}</strong>
+        <span class="dash-kpi-sub">total surveys</span>
+        <span class="dash-kpi-tick" style="background: #f05424;"></span>
+    </div>
+    <div class="dash-kpi {% if not summary.surveys_this_month %}is-zero{% endif %}">
+        <span class="dash-kpi-key">This month</span>
+        <strong class="dash-kpi-num">{{ summary.surveys_this_month }}</strong>
+        <span class="dash-kpi-sub">surveys this month</span>
+        <span class="dash-kpi-tick" style="background: {{ '#e5d8be' if not summary.surveys_this_month else '#3f7a22' }};"></span>
+    </div>
+    <div class="dash-kpi">
+        <span class="dash-kpi-key">Completed</span>
+        <strong class="dash-kpi-num">{{ summary.completed_surveys }}</strong>
+        <span class="dash-kpi-sub">{{ '%.0f%% of surveys'|format(100 * summary.completed_surveys / summary.total_surveys) if summary.total_surveys else 'none yet' }}</span>
+        <span class="dash-kpi-tick" style="background: #3f7a22;"></span>
+    </div>
+</div>
+
+<section class="dash-section">
+    <div class="dash-section-head">
+        <h2>Colour class mix</h2>
+        <span class="dash-note">{{ class_total }} completed image classification{{ '' if class_total == 1 else 's' }} · model classes, not validated species</span>
+    </div>
+    {% if class_total %}
+        <div class="dash-mix">
+            {% for label, count in summary.species_counts | dictsort(by='value', reverse=true) %}
+                <span style="flex: {{ count }}; {{ class_style(label) }}">{{ label|capitalize }} {{ count }}</span>
+            {% endfor %}
+        </div>
+        <div class="dash-mix-key">
+            {% for label, count in summary.species_counts | dictsort(by='value', reverse=true) %}
+                <span><i style="{{ class_style(label) }}"></i>{{ label|capitalize }} · {{ '%.0f'|format(100 * count / class_total) }}%</span>
+            {% endfor %}
+        </div>
+    {% else %}
+        <p class="empty">No classifications yet. The mix appears once a survey finishes analysis.</p>
+    {% endif %}
+</section>
+
+<section class="dash-section">
+    <div class="dash-section-head">
+        <h2>Recent surveys</h2>
+        <a href="{{ url_for('surveys') }}">All surveys →</a>
+    </div>
+    <div class="dash-ledger">
+        {% for survey in recent_surveys %}
+            {% set ds = survey.survey_date | string %}
+            {% set probs = survey.probabilities or {} %}
+            <div class="dash-row">
+                <span class="dash-date">{{ MONTHS[ds[5:7]|int] }}<strong>{{ ds[8:10] }}</strong>{{ ds[0:4] }}</span>
+                <span class="dash-who">
+                    <a href="{{ url_for('survey_detail', survey_id=survey.survey_id) }}">{{ survey.site_name }}</a>
+                    <small>{{ display_survey_code(survey.survey_id) }}</small>
+                </span>
+                <span class="dash-spread-wrap">
+                    {% if probs %}
+                        {% set class_order = ['orange', 'red', 'yellow'] %}
+                        <span
+                            class="dash-spread"
+                            role="img"
+                            aria-label="{% for label in class_order %}{{ label|capitalize }} {{ ((probs.get(label, 0)|float) * 100)|round|int }}%{{ ', ' if not loop.last }}{% endfor %}"
+                        >
+                            {% for label in class_order %}
+                                {% set probability = probs.get(label, 0) %}
+                                <i style="flex: {{ (probability|float * 1000)|round|int }}; {{ class_style(label) }}"></i>
+                            {% endfor %}
+                        </span>
+                    {% endif %}
+                </span>
+
+                <span class="dash-call">
+                    {% if survey.predicted_species %}
+                        <span class="dash-chip" title="Survey-average colour classification">
+                            <i style="{{ class_style(survey.predicted_species) }}"></i>
+                            {{ survey.predicted_species|capitalize }}
+                            {% if survey.species_confidence is not none %}
+                                <span class="dash-chip-confidence">· {{ '%.0f%%'|format((survey.species_confidence|float) * 100) }}</span>
+                            {% endif %}
+                        </span>
+                    {% else %}
+                        <span class="dash-conf">—</span>
+                    {% endif %}
+                </span>
+            </div>
+        {% else %}
+            <p class="empty">No surveys yet. Create a survey to add your first drone images.</p>
+        {% endfor %}
+    </div>
+</section>
+{% endblock %}

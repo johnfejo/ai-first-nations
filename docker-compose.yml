@@ -1,0 +1,45 @@
+services:
+  pgadmin:
+    image: dpage/pgadmin4:9.18
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:?Set PGADMIN_DEFAULT_PASSWORD in .env}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      PGADMIN_DISABLE_POSTFIX: "1"
+      PGPASS_FILE: /run/secrets/railway_pgpass
+    ports:
+      - "127.0.0.1:5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+    secrets:
+      - railway_pgpass
+
+  db:
+    image: postgres:16
+    container_name: aifn-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aifn
+      POSTGRES_PASSWORD: aifn_dev_password
+      POSTGRES_DB: aifn_mangrove
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aifn -d aifn_mangrove"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  pgadmin_data:
+
+secrets:
+  railway_pgpass:
+    file: ./.secrets/railway.pgpass
